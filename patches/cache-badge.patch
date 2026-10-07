@@ -51,7 +51,7 @@ index d97e9393..e0c6468d 100644
 +  });
 +});
 diff --git a/apps/web/src/components/chat/ContextWindowMeter.logic.ts b/apps/web/src/components/chat/ContextWindowMeter.logic.ts
-index 390caab1..dd006b5a 100644
+index 390caab1..1305556d 100644
 --- a/apps/web/src/components/chat/ContextWindowMeter.logic.ts
 +++ b/apps/web/src/components/chat/ContextWindowMeter.logic.ts
 @@ -143,3 +143,32 @@ export function formatContextWindowCost(cost: {
@@ -71,8 +71,8 @@ index 390caab1..dd006b5a 100644
 +
 +export function derivePromptCacheStatus(
 +  usage: {
-+    readonly inputTokens: number | null;
-+    readonly cachedInputTokens: number | null;
++    readonly inputTokens?: number | null | undefined;
++    readonly cachedInputTokens?: number | null | undefined;
 +    readonly updatedAt: string;
 +  },
 +  nowMs: number,
@@ -81,7 +81,7 @@ index 390caab1..dd006b5a 100644
 +  const reportedAtMs = Date.parse(usage.updatedAt);
 +  if (!Number.isFinite(reportedAtMs)) return null;
 +  const hitPercentage =
-+    usage.inputTokens !== null && usage.inputTokens > 0 && usage.cachedInputTokens !== null
++    usage.inputTokens != null && usage.inputTokens > 0 && usage.cachedInputTokens != null
 +      ? Math.min(100, (usage.cachedInputTokens / usage.inputTokens) * 100)
 +      : null;
 +  const expiresAtMs = reportedAtMs + ttlMs;
