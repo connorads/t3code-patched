@@ -1,0 +1,157 @@
+diff --git a/apps/web/src/components/chat/ContextWindowMeter.logic.test.ts b/apps/web/src/components/chat/ContextWindowMeter.logic.test.ts
+index d97e9393..e0c6468d 100644
+--- a/apps/web/src/components/chat/ContextWindowMeter.logic.test.ts
++++ b/apps/web/src/components/chat/ContextWindowMeter.logic.test.ts
+@@ -2,6 +2,7 @@ import { ProviderDriverKind, ProviderInstanceId, type ServerProvider } from "@t3
+ import { describe, expect, it } from "vite-plus/test";
+ import { deriveProviderInstanceEntries } from "../../providerInstances";
+ import {
++  derivePromptCacheStatus,
+   formatContextWindowCompactionMessage,
+   hasAvailableCompactionProvider,
+   hasDismissedResumeCompaction,
+@@ -294,3 +295,39 @@ describe("formatContextWindowCost", () => {
+     expect(formatContextWindowCost({ amount: 0.0042, currency: "USD" })).toBe("USD 0.0042");
+   });
+ });
++
++describe("derivePromptCacheStatus", () => {
++  const updatedAt = "2026-10-07T20:00:00.000Z";
++  const reportedAtMs = Date.parse(updatedAt);
++
++  it("reports the cache hit share and stays warm inside the TTL", () => {
++    expect(
++      derivePromptCacheStatus(
++        { inputTokens: 200_000, cachedInputTokens: 194_000, updatedAt },
++        reportedAtMs + 59 * 60_000,
++      ),
++    ).toEqual({ hitPercentage: 97, expiresAtMs: reportedAtMs + 3_600_000, warm: true });
++  });
++
++  it("turns cold once the TTL has passed", () => {
++    expect(
++      derivePromptCacheStatus(
++        { inputTokens: 1_000, cachedInputTokens: 0, updatedAt },
++        reportedAtMs + 3_600_000,
++      )?.warm,
++    ).toBe(false);
++  });
++
++  it("has no hit share when the provider reports no input", () => {
++    expect(
++      derivePromptCacheStatus({ inputTokens: null, cachedInputTokens: null, updatedAt }, 0)
++        ?.hitPercentage,
++    ).toBeNull();
++  });
++
++  it("returns null for an unparseable timestamp", () => {
++    expect(
++      derivePromptCacheStatus({ inputTokens: 1, cachedInputTokens: 1, updatedAt: "nope" }, 0),
++    ).toBeNull();
++  });
++});
+diff --git a/apps/web/src/components/chat/ContextWindowMeter.logic.ts b/apps/web/src/components/chat/ContextWindowMeter.logic.ts
+index 390caab1..dd006b5a 100644
+--- a/apps/web/src/components/chat/ContextWindowMeter.logic.ts
++++ b/apps/web/src/components/chat/ContextWindowMeter.logic.ts
+@@ -143,3 +143,32 @@ export function formatContextWindowCost(cost: {
+   const fractionDigits = Math.abs(cost.amount) > 0 && Math.abs(cost.amount) < 0.01 ? 4 : 2;
+   return `${cost.currency} ${cost.amount.toFixed(fractionDigits)}`;
+ }
++
++/** Claude subscription prompt-cache lifetime; API keys and overage get 5 minutes. */
++export const PROMPT_CACHE_TTL_MS = 60 * 60 * 1000;
++
++export type PromptCacheStatus = {
++  /** Share of the last request's input read from cache, 0-100; null when unreported. */
++  readonly hitPercentage: number | null;
++  readonly expiresAtMs: number;
++  readonly warm: boolean;
++};
++
++export function derivePromptCacheStatus(
++  usage: {
++    readonly inputTokens: number | null;
++    readonly cachedInputTokens: number | null;
++    readonly updatedAt: string;
++  },
++  nowMs: number,
++  ttlMs: number = PROMPT_CACHE_TTL_MS,
++): PromptCacheStatus | null {
++  const reportedAtMs = Date.parse(usage.updatedAt);
++  if (!Number.isFinite(reportedAtMs)) return null;
++  const hitPercentage =
++    usage.inputTokens !== null && usage.inputTokens > 0 && usage.cachedInputTokens !== null
++      ? Math.min(100, (usage.cachedInputTokens / usage.inputTokens) * 100)
++      : null;
++  const expiresAtMs = reportedAtMs + ttlMs;
++  return { hitPercentage, expiresAtMs, warm: nowMs < expiresAtMs };
++}
+diff --git a/apps/web/src/components/chat/ContextWindowMeter.tsx b/apps/web/src/components/chat/ContextWindowMeter.tsx
+index 5c9fc8bb..4b98ba28 100644
+--- a/apps/web/src/components/chat/ContextWindowMeter.tsx
++++ b/apps/web/src/components/chat/ContextWindowMeter.tsx
+@@ -1,7 +1,9 @@
+ import { Button } from "../ui/button";
+ import { type ContextWindowSnapshot, formatContextWindowTokens } from "~/lib/contextWindow";
+ import { Popover, PopoverPopup, PopoverTrigger } from "../ui/popover";
++import { useEffect, useState } from "react";
+ import {
++  derivePromptCacheStatus,
+   formatContextWindowCompactionMessage,
+   formatContextWindowCost,
+ } from "./ContextWindowMeter.logic";
+@@ -38,6 +40,17 @@ export function ContextWindowMeter(props: {
+     ? "var(--color-error)"
+     : "color-mix(in oklab, var(--color-muted-foreground) 72%, transparent)";
+ 
++  const [nowMs, setNowMs] = useState(() => Date.now());
++  const cacheStatus = derivePromptCacheStatus(usage, nowMs);
++  const cacheExpiresAtMs = cacheStatus?.warm ? cacheStatus.expiresAtMs : null;
++  useEffect(() => {
++    setNowMs(Date.now());
++    if (cacheExpiresAtMs === null) return;
++    const timer = setTimeout(() => setNowMs(Date.now()), cacheExpiresAtMs - Date.now() + 50);
++    return () => clearTimeout(timer);
++  }, [cacheExpiresAtMs]);
++  const cacheHitLabel = formatPercentage(cacheStatus?.hitPercentage ?? null);
++
+   return (
+     <Popover>
+       <PopoverTrigger
+@@ -82,6 +95,14 @@ export function ContextWindowMeter(props: {
+                   className="transition-[stroke-dashoffset,stroke] duration-500 ease-out motion-reduce:transition-none"
+                 />
+               </svg>
++              {cacheStatus ? (
++                <span
++                  aria-hidden="true"
++                  className={`absolute -top-0.5 -right-0.5 size-1.5 rounded-full ${
++                    cacheStatus.warm ? "bg-success" : "bg-muted-foreground/40"
++                  }`}
++                />
++              ) : null}
+             </span>
+           </Button>
+         }
+@@ -136,6 +157,20 @@ export function ContextWindowMeter(props: {
+               </span>
+             </div>
+           ) : null}
++          {cacheStatus ? (
++            <div className="flex items-center justify-between gap-3 text-2xs leading-4">
++              <span className="text-secondary-label">Cache</span>
++              <span className="font-medium tabular-nums text-secondary-label">
++                {cacheHitLabel ? `${cacheHitLabel} hit · ` : ""}
++                {cacheStatus.warm
++                  ? `warm until ${new Date(cacheStatus.expiresAtMs).toLocaleTimeString([], {
++                      hour: "2-digit",
++                      minute: "2-digit",
++                    })}`
++                  : "cold"}
++              </span>
++            </div>
++          ) : null}
+           {usage.cost != null ? (
+             <div className="flex items-center justify-between gap-3 text-2xs leading-4">
+               <span className="text-secondary-label">Cost</span>

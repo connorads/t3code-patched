@@ -33,6 +33,7 @@
             fetcherVersion = 4;
             hash = pins.pnpmDepsHash;
           };
+          patches = (old.patches or [ ]) ++ [ ./patches/cache-badge.patch ];
         }
       );
     in
