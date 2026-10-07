@@ -1,0 +1,78 @@
+name: build
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+  schedule:
+    - cron: "17 6 * * *"
+
+concurrency:
+  group: build
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+  issues: write
+
+jobs:
+  patch-tests:
+    # Scheduled runs only bump the pin; the macOS build still compiles the patch.
+    if: github.event_name != 'schedule'
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Check out pinned upstream nightly
+        run: |
+          tag=$(jq -r .tag pins.json)
+          git clone --quiet --depth 1 --branch "$tag" https://github.com/pingdotgg/t3code.git upstream
+          for patch in patches/*.patch; do git -C upstream apply "../$patch"; done
+      - uses: pnpm/action-setup@ea17c68df8912ef543352723c149a84f56e3d413 # v6.1.0
+        with:
+          package_json_file: upstream/package.json
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 24
+      - name: Install
+        working-directory: upstream
+        run: pnpm install --frozen-lockfile
+      - name: Patch unit tests
+        working-directory: upstream/apps/web
+        run: pnpm exec vp test run --project unit src/components/chat/ContextWindowMeter.logic.test.ts
+      - name: Web typecheck
+        working-directory: upstream/apps/web
+        run: pnpm typecheck
+
+  build:
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: cachix/install-nix-action@13d8dd58da0234aa297dedd986986ccb8e7f3e24 # v31.11.1
+      - uses: cachix/cachix-action@38b082610b782e7e93e209c35fd730d399dee866 # v17
+        if: ${{ vars.CACHIX_CACHE != '' }}
+        with:
+          name: ${{ vars.CACHIX_CACHE }}
+          authToken: ${{ secrets.CACHIX_AUTH_TOKEN }}
+      - name: Bump to latest nightly
+        id: bump
+        if: github.event_name != 'push'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: scripts/bump.sh
+      - name: Build
+        run: nix build .#default -L
+      - name: Commit new pin
+        if: steps.bump.outputs.changed == 'true'
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git commit -am "Bump T3 Code to ${{ steps.bump.outputs.tag }}"
+          git push
+      - name: Report broken patch
+        if: failure() && steps.bump.outputs.patch_failed == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          title="Patch does not apply to ${{ steps.bump.outputs.tag }}"
+          gh issue list --state open --search "in:title \"$title\"" --json number --jq 'length' | grep -qx 0 || exit 0
+          gh issue create --title "$title" --body "Run: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
