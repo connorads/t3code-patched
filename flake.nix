@@ -34,6 +34,12 @@
             hash = pins.pnpmDepsHash;
           };
           patches = (old.patches or [ ]) ++ [ ./patches/cache-badge.patch ];
+          # nixpkgs names the bundle after the stable channel.
+          postInstall = (old.postInstall or "") + ''
+            mv "$out/Applications/T3 Code (Alpha).app" "$out/Applications/T3 Code (Nightly).app"
+            substituteInPlace "$out/Applications/T3 Code (Nightly).app/Contents/Info.plist" \
+              --replace-fail "<string>T3 Code (Alpha)</string>" "<string>T3 Code (Nightly)</string>"
+          '';
         }
       );
     in
